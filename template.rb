@@ -110,10 +110,13 @@ gem 'state_machine'
 gem 'validate_email'
 gem 'kaminari'
 gem 'rails-i18n'
+gem 'bcrypt-ruby'
 gem 'airbrake'
 gem 'whenever', :require => false
 gem 'therubyracer', :require => 'v8'
-initializer 'sidekiq.rb', <<-CODE
+gem 'validates_existence', :git => 'https://github.com/perfectline/validates_existence.git'
+
+initializer 'bigdecimal.rb', <<-CODE
 require 'bigdecimal/util'
 
 class NilClass
@@ -133,12 +136,12 @@ gem 'haml-rails'
 
 
 say_recipe 'Sidekiq'
-gem 'sinatra', '>= 1.3.0', :require => nil
-gem 'sidekiq', '2.17.7'
+gem 'sinatra', :require => nil
+gem 'sidekiq'
 gem 'sidekiq-failures'
 
+route "mount Sidekiq::Web => '/sidekiq'"
 route "require 'sidekiq/web'"
-route " mount Sidekiq::Web => '/sidekiq'"
 file 'config/sidekiq.yml', <<-CODE
 ---
 :verbose: false
@@ -184,9 +187,6 @@ end
 
 
 
-say_recipe 'Sequel'
-gem 'sequel-rails'
-application "require 'sequel-rails/railtie'"
 
 # >-----------------------------[ Run Bundler ]-------------------------------<
 
@@ -210,4 +210,64 @@ end
   TASK
 end
 
+
+# >-----------------------------[ Create Users ]-------------------------------<
+
+generate(:model, "user", "email:string:uniq", "first_name:string", "last_name:string", "encrypted_password:string", "time_zone_name:string")
+generate(:model, "account", "user:references")
+
+file 'app/models/account.rb', <<-CODE
+# Mainly it is a company which can have several shops and one user, who is the owner
+class Account < ActiveRecord::Base
+  belongs_to :user
+
+  validates :user_id, presence: true, existence: true
+
+end
+CODE
+file 'app/models/user.rb', <<-CODE
+require 'bcrypt'
+class User < ActiveRecord::Base
+  has_many :accounts, dependent: :destroy
+  
+  attr_reader :password
+   
+  validates :email, presence: true, length: {maximum: 255}, uniqueness: {case_sensitive: false}
+  validates :password,
+    confirmation: true,
+    length: { minimum: 3 }, on: :update, if: :password_required?
+    
+  before_validation do
+    self.email      = self.email.downcase       if self.email.present?
+    self.first_name = self.first_name.titleize  if self.first_name.present?
+    self.last_name  = self.last_name.titleize   if self.last_name.present?
+  end
+  
+  def name
+    "#\{first_name} #\{last_name}".strip
+  end
+  
+  def password_required?
+    password.present?
+  end
+  
+  
+  def self.authenticate(params)
+    user = find_by(email: params[:email])
+
+    if user && user.valid_password?(params[:password])
+      return user
+    end
+  end
+  
+  def valid_password?(string)
+    BCrypt::Password.new(string) == self.encrypted_password
+  end
+  
+  def password= str
+    @password = str
+    self.encrypted_password = BCrypt::Password.create(str)
+  end
+end
+CODE
 
