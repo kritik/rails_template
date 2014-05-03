@@ -111,7 +111,7 @@ gem 'validate_email'
 gem 'kaminari'
 gem 'rails-i18n'
 gem 'bcrypt-ruby'
-gem 'airbrake'
+# gem 'airbrake'
 gem 'whenever', :require => false
 gem 'therubyracer', :require => 'v8'
 gem 'paper_trail', '~> 3.0.1'
@@ -274,3 +274,182 @@ class User < ActiveRecord::Base
 end
 CODE
 
+# >------------------------[ Capistrano And Others ]----------------------------<
+gem_group :development do
+  gem 'annotate'
+  gem 'active_record_query_trace'
+  gem 'pry-rails'
+  gem 'capistrano'
+  gem 'capistrano-rails'
+  gem 'capistrano-bundler'
+  gem 'sepastian-capistrano3-unicorn', require: false
+  gem 'capistrano-sidekiq'
+end
+initializer 'active_record_query_trace.rb', <<-CODE
+# Using to find out who run SQL query
+ActiveRecordQueryTrace.enabled = false
+
+# Default is 5. Setting to 0 includes entire trace.
+# ActiveRecordQueryTrace.lines = 10
+CODE
+
+file 'config/deploy.rb', <<-CODE
+lock '3.2.1'
+
+set :application, '#{app_name}'
+set :repo_url,    'git@code.perfectline.co:perfectline/#{app_name}.git'
+
+
+set :scm, :git
+set :format, :pretty
+set :log_level, :debug
+set :sidekiq_options, "-C #\{fetch(:deploy_to)}/config/sidekiq.yml"
+set :linked_dirs, %w{bin log tmp/pids tmp/cache tmp/sockets vendor/bundle public/assets public/system public/uploads}
+
+SSHKit.config.command_map[:rake]  = "bundle exec rake"
+SSHKit.config.command_map[:rails] = "bundle exec rails"
+
+set :keep_releases, 5
+
+
+namespace :deploy do
+  after :restart,  'unicorn:restart'
+end
+CODE
+
+file 'config/deploy/production.rb', <<-CODE
+# Simple Role Syntax
+# ==================
+# Supports bulk-adding hosts to roles, the primary
+# server in each group is considered to be the first
+# unless any hosts have the primary property set.
+# Don't declare `role :all`, it's a meta role
+role :app, %w{deploy@example.com}
+role :web, %w{deploy@example.com}
+role :db,  %w{deploy@example.com}
+
+# Extended Server Syntax
+# ======================
+# This can be used to drop a more detailed server
+# definition into the server list. The second argument
+# something that quacks like a hash can be used to set
+# extended properties on the server.
+server 'example.com', user: 'deploy', roles: %w{web app}, my_property: :my_value
+
+# you can set custom ssh options
+# it's possible to pass any option but you need to keep in mind that net/ssh understand limited list of options
+# you can see them in [net/ssh documentation](http://net-ssh.github.io/net-ssh/classes/Net/SSH.html#method-c-start)
+# set it globally
+#  set :ssh_options, {
+#    keys: %w(/home/rlisowski/.ssh/id_rsa),
+#    forward_agent: false,
+#    auth_methods: %w(password)
+#  }
+# and/or per server
+# server 'example.com',
+#   user: 'user_name',
+#   roles: %w{web app},
+#   ssh_options: {
+#     user: 'user_name', # overrides user setting above
+#     keys: %w(/home/user_name/.ssh/id_rsa),
+#     forward_agent: false,
+#     auth_methods: %w(publickey password)
+#     # password: 'please use keys'
+#   }
+# setting per server overrides global ssh_options
+CODE
+file 'config/deploy/staging.rb', <<-CODE
+host = "perfectline-staging.vps.servefinity.com"
+role :app, [host]
+role :web, [host]
+role :db,  [host]
+
+
+server host, user: 'deploy', roles: %w{web app db}, my_property: :my_value
+
+set :branch,  ENV["REVISION"] || ENV["BRANCH_NAME"] || "master"
+set :deploy_to,     "/var/www/#{app_name}"
+set :stage,         :staging
+set :use_sudo,      false
+set :rails_env,        fetch(:stage)
+set :unicorn_rack_env, fetch(:stage)
+set :sidekiq_options, "-C #\{current_path}/config/sidekiq.yml"
+#set :unicorn_pid, Proc.new{ File.join(fetch(:app_path), 'tmp', 'pids', 'unicorn.pid') }
+CODE
+file 'Capfile', <<-CODE
+# Load DSL and Setup Up Stages
+require 'capistrano/setup'
+require 'capistrano/deploy'
+
+require 'capistrano/console'
+require 'capistrano/bundler'
+require 'capistrano/rails/assets'
+require 'capistrano/rails/migrations'
+# require "whenever/capistrano"
+require 'capistrano/unicorn'
+require 'capistrano/sidekiq'
+# require 'airbrake/capistrano3'
+
+# Loads custom tasks from `lib/capistrano/tasks' if you have any defined.
+Dir.glob('lib/capistrano/tasks/*.cap').each { |r| import r }
+CODE
+file 'lib/capistrano/tasks/log.cap', <<-CODE
+namespace :logs do
+  desc "tail -f server logs."
+  task :web do
+    on roles(:web) do
+      execute "tail -f #\{shared_path}/log/#\{fetch(:stage)}.log"
+    end
+  end
+
+  desc "tail -f elasticsearch logs."
+  task :elastic do
+    on roles(:web) do
+      execute "tail -f #\{shared_path}/log/elasticsearch.log"
+    end
+  end
+end
+CODE
+file 'lib/capistrano/tasks/db.cap', <<-CODE
+namespace :db do
+  def load_db_data
+    #Currently read logs from local data
+    #data = capture("cat #\{current_path}/config/database.yml")
+    data = File.read("config/database.yml")
+
+    yaml = YAML.load(data)[fetch(:stage).to_s]
+    set :environment_info,  yaml
+
+    now = Time.now
+    backup_time = [now.year,now.month,now.day,now.hour,now.min,now.sec].join
+    execute :mkdir, "-p", "#\{shared_path}/db_backups"
+    set :backup_file, "#\{shared_path}/db_backups/#\{fetch(:environment_info)['database']}-snapshot-#\{backup_time}.sql"
+  end
+
+
+  desc "Backup your MySQL or PostgreSQL database to shared_path+/db_backups"
+  task :dump do
+    on roles(:db), only: {primary: true} do
+      load_db_data
+      @environment_info = fetch(:environment_info)
+
+      host = %{-U #\{@environment_info['username']} -h #\{@environment_info['host']} } if @environment_info['host']
+      cmd = %{pg_dump #\{host} -Fc #\{@environment_info['database']} > #\{fetch(:backup_file)}.dump}
+      execute cmd do |ch, stream, out |
+        ch.send_data "#\{@environment_info['password']}\n" if out.to_s =~ /^Password:/
+      end
+    end
+  end
+
+  desc "Sync your production database to your local workstation"
+  task :to_local do
+    on roles(:db), only: {primary: true} do
+      dump
+      filename = "/tmp/#\{application}.dump"
+      dev_info = YAML.load_file("config/database.yml")['development']
+      download! "#\{fetch(:backup_file)}.dump", filename
+      `pg_restore --verbose --clean --no-acl --no-owner -d #\{dev_info['database']} #\{filename}`
+    end
+  end
+end
+CODE
