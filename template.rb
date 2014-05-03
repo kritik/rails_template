@@ -114,6 +114,7 @@ gem 'bcrypt-ruby'
 gem 'airbrake'
 gem 'whenever', :require => false
 gem 'therubyracer', :require => 'v8'
+gem 'paper_trail', '~> 3.0.1'
 gem 'validates_existence', :git => 'https://github.com/perfectline/validates_existence.git'
 
 initializer 'bigdecimal.rb', <<-CODE
@@ -215,6 +216,7 @@ end
 
 generate(:model, "user", "email:string:uniq", "first_name:string", "last_name:string", "encrypted_password:string", "time_zone_name:string")
 generate(:model, "account", "user:references")
+generate("paper_trail:install")
 
 file 'app/models/account.rb', <<-CODE
 # Mainly it is a company which can have several shops and one user, who is the owner
@@ -228,6 +230,7 @@ CODE
 file 'app/models/user.rb', <<-CODE
 require 'bcrypt'
 class User < ActiveRecord::Base
+  has_paper_trail
   has_many :accounts, dependent: :destroy
   
   attr_reader :password
